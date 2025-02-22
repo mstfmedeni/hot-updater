@@ -52,7 +52,7 @@ export const addListener = <T extends keyof HotUpdaterEvent>(
 /**
  * Downloads files from given URLs.
  *
- * @param {string} bundleId - identifier for the bundle version.
+ * @param {string} bundleId - identifier for the bundle id.
  * @param {string | null} zipUrl - zip file URL. If null, it means rolling back to the built-in bundle
  * @returns {Promise<boolean>} Resolves with true if download was successful, otherwise rejects with an error.
  */
@@ -74,7 +74,9 @@ export const getAppVersion = (): Promise<string | null> => {
  * Reloads the app.
  */
 export const reload = () => {
-  HotUpdaterNative.reload();
+  requestAnimationFrame(() => {
+    HotUpdaterNative.reload();
+  });
 };
 
 /**

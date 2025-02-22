@@ -5,6 +5,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Switch,
   SwitchControl,
@@ -16,13 +17,53 @@ import {
   TextFieldInput,
   TextFieldLabel,
 } from "@/components/ui/text-field";
-import { api } from "@/lib/api";
+import { api, createBundleQuery, createConfigQuery } from "@/lib/api";
 import { cn } from "@/lib/utils";
+
 import type { Bundle } from "@hot-updater/plugin-core";
-import { createAsync } from "@solidjs/router";
 import { createForm } from "@tanstack/solid-form";
+import { useQueryClient } from "@tanstack/solid-query";
+import { LoaderCircle } from "lucide-solid";
 import semverValid from "semver/ranges/valid";
-import { Show, createMemo } from "solid-js";
+import { Show, createMemo, createSignal } from "solid-js";
+import { toast } from "solid-sonner";
+
+export interface EditBundleSheetContentProps {
+  bundleId: string;
+  onClose: () => void;
+}
+
+export const EditBundleSheetContent = ({
+  bundleId,
+  onClose,
+}: EditBundleSheetContentProps) => {
+  const data = createBundleQuery(bundleId);
+
+  return (
+    <SheetContent class="flex flex-col h-full">
+      <SheetHeader class="mb-4">
+        <SheetTitle>Edit {bundleId}</SheetTitle>
+      </SheetHeader>
+
+      <Show
+        when={data.data}
+        fallback={
+          data.isFetched ? (
+            <SheetDescription>
+              No update bundle found for bundle id {bundleId}
+            </SheetDescription>
+          ) : (
+            <Skeleton height={374} radius={10} />
+          )
+        }
+      >
+        {(bundle) => (
+          <EditBundleSheetForm bundle={bundle()} onEditSuccess={onClose} />
+        )}
+      </Show>
+    </SheetContent>
+  );
+};
 
 interface EditBundleSheetFormProps {
   bundle: Bundle;
@@ -33,11 +74,11 @@ const EditBundleSheetForm = ({
   bundle,
   onEditSuccess,
 }: EditBundleSheetFormProps) => {
-  const config = createAsync(() =>
-    api.getConfig.$get().then((res) => res.json()),
-  );
+  const queryClient = useQueryClient();
+  const config = createConfigQuery();
 
-  const gitUrl = createMemo(() => config()?.console?.gitUrl);
+  const [isSubmitting, setIsSubmitting] = createSignal(false);
+  const gitUrl = createMemo(() => config.data?.console?.gitUrl ?? null);
   const gitCommitHash = createMemo(() => bundle.gitCommitHash);
 
   const form = createForm(() => ({
@@ -48,15 +89,24 @@ const EditBundleSheetForm = ({
       shouldForceUpdate: bundle.shouldForceUpdate,
     } as Partial<Bundle>,
     onSubmit: async ({ value }) => {
-      // Do something with form data
-
-      await api.updateBundle.$post({
-        json: {
-          targetBundleId: bundle.id,
-          bundle: value,
-        },
-      });
-      onEditSuccess();
+      setIsSubmitting(true);
+      try {
+        await api.updateBundle.$post({
+          json: {
+            targetBundleId: bundle.id,
+            bundle: value,
+          },
+        });
+      } catch (e) {
+        if (e instanceof Error) {
+          toast(e.message);
+        }
+      } finally {
+        setIsSubmitting(false);
+        queryClient.invalidateQueries({ queryKey: ["getBundle", bundle.id] });
+        queryClient.invalidateQueries({ queryKey: ["getBundles"] });
+        onEditSuccess();
+      }
     },
   }));
 
@@ -183,9 +233,19 @@ const EditBundleSheetForm = ({
           continuing to use the application.
         </p>
       </div>
-      <Button type="submit" class="mt-4" disabled={!isValid()}>
-        Save
-      </Button>
+
+      <Show
+        when={!isSubmitting()}
+        fallback={
+          <Button type="submit" class="mt-4" disabled>
+            <LoaderCircle class="animate-spin" />
+          </Button>
+        }
+      >
+        <Button type="submit" class="mt-4" disabled={!isValid()}>
+          Save
+        </Button>
+      </Show>
 
       <div class="flex justify-end">
         <Show when={gitCommitHash()}>
@@ -208,40 +268,5 @@ const EditBundleSheetForm = ({
         </Show>
       </div>
     </form>
-  );
-};
-
-export interface EditBundleSheetContentProps {
-  bundleId: string;
-  onClose: () => void;
-}
-
-export const EditBundleSheetContent = ({
-  bundleId,
-  onClose,
-}: EditBundleSheetContentProps) => {
-  const bundle = createAsync(() =>
-    api.getBundleById.$post({ json: { bundleId } }).then((res) => res.json()),
-  );
-
-  return (
-    <SheetContent class="flex flex-col h-full">
-      <SheetHeader class="mb-4">
-        <SheetTitle>Edit {bundle()?.id}</SheetTitle>
-      </SheetHeader>
-
-      <Show
-        when={bundle()}
-        fallback={
-          <SheetDescription>
-            No update bundle found for bundle id {bundleId}
-          </SheetDescription>
-        }
-      >
-        {(bundle) => (
-          <EditBundleSheetForm bundle={bundle()} onEditSuccess={onClose} />
-        )}
-      </Show>
-    </SheetContent>
   );
 };

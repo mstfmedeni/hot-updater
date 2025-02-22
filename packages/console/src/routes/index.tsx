@@ -1,19 +1,9 @@
-import logo from "@/assets/logo.png";
-
-import { SplashScreen } from "@/components/spash-screen";
-
-import { useNavigate, useParams } from "@solidjs/router";
-
 import { Sheet } from "@/components/ui/sheet";
-import { api } from "@/lib/api";
-import {
-  Show,
-  Suspense,
-  createEffect,
-  createResource,
-  createSignal,
-  useTransition,
-} from "solid-js";
+import { createBundlesQuery } from "@/lib/api";
+import { sleep } from "@/lib/utils";
+import { useNavigate, useParams } from "@solidjs/router";
+import { createEffect, createMemo } from "solid-js";
+import { Show, Suspense, createSignal } from "solid-js";
 import { columns } from "./_components/columns";
 import { DataTable } from "./_components/data-table";
 import { EditBundleSheetContent } from "./_components/edit-bundle-sheet-content";
@@ -24,15 +14,11 @@ export default function Home() {
 
   const bundleId = params.bundleId;
 
-  const [data, { refetch }] = createResource(() =>
-    api.getBundles.$get().then((res) => res.json()),
-  );
+  const data = createBundlesQuery();
 
   const [selectedBundleId, setSelectedBundleId] = createSignal<string | null>(
     bundleId,
   );
-
-  const [_, start] = useTransition();
 
   createEffect(() => {
     if (!selectedBundleId()) {
@@ -42,52 +28,39 @@ export default function Home() {
     navigate(`/${selectedBundleId()}`, { replace: true });
   });
 
-  return (
-    <Suspense fallback={<SplashScreen />}>
-      <main class="w-full space-y-2.5">
-        <div class="flex flex-row items-center gap-1">
-          <img src={logo} alt="Hot Updater Console" class="w-12 h-12" />
-          <a
-            href="https://github.com/gronxb/hot-updater"
-            target="_blank"
-            class="text-2xl font-light"
-            rel="noreferrer"
-          >
-            Hot Updater Console
-          </a>
-        </div>
+  createEffect(() => {
+    if (isOpen()) {
+      return;
+    }
+    sleep(500).then(() => setSelectedBundleId(null));
+  });
 
+  const dataForTable = createMemo(() => data.data || []);
+  const [isOpen, setIsOpen] = createSignal(true);
+
+  const handleClose = () => {
+    setIsOpen(false);
+  };
+
+  return (
+    <>
+      <Sheet open={isOpen()} onOpenChange={setIsOpen}>
         <DataTable
           columns={columns}
-          data={data}
+          data={dataForTable}
           onRowClick={(row) => {
-            start(() => {
-              setSelectedBundleId(row.id);
-            });
+            setSelectedBundleId(row.id);
           }}
         />
-
-        <Sheet
-          open={selectedBundleId() !== null}
-          onOpenChange={(open) =>
-            !open && start(() => setSelectedBundleId(null))
-          }
-        >
-          <Show when={selectedBundleId()}>
-            <Suspense>
-              <EditBundleSheetContent
-                bundleId={selectedBundleId()!}
-                onClose={() =>
-                  start(() => {
-                    setSelectedBundleId(null);
-                    refetch();
-                  })
-                }
-              />
-            </Suspense>
-          </Show>
-        </Sheet>
-      </main>
-    </Suspense>
+        <Show when={selectedBundleId()}>
+          <Suspense>
+            <EditBundleSheetContent
+              bundleId={selectedBundleId()!}
+              onClose={handleClose}
+            />
+          </Suspense>
+        </Show>
+      </Sheet>
+    </>
   );
 }

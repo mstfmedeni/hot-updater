@@ -12,6 +12,8 @@ import com.facebook.react.bridge.NativeModule
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.uimanager.ReactShadowNode
 import com.facebook.react.uimanager.ViewManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -24,26 +26,6 @@ class HotUpdater : ReactPackage {
         listOf(HotUpdaterModule(context)).toMutableList()
 
     companion object {
-        private fun convertFileSystemPathFromBasePath(
-            context: Context,
-            basePath: String,
-        ): String {
-            val documentsDir = context.getExternalFilesDir(null)?.absolutePath ?: context.filesDir.absolutePath
-            val separator = if (basePath.startsWith("/")) "" else "/"
-
-            return "$documentsDir$separator$basePath"
-        }
-
-        private fun stripPrefixFromPath(
-            prefix: String,
-            path: String,
-        ): String =
-            if (path.startsWith("/$prefix/")) {
-                path.replaceFirst("/$prefix/", "")
-            } else {
-                path
-            }
-
         fun getAppVersion(context: Context): String? {
             val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
             return packageInfo.versionName
@@ -65,12 +47,11 @@ class HotUpdater : ReactPackage {
             }
 
             val reactIntegrationManager = ReactIntegrationManager(context)
-
             val activity: Activity? = getCurrentActivity(context)
-            val reactApplication: ReactApplication = reactIntegrationManager.getReactApplication(activity?.application)
-            val bundleURL = getJSBundleFile(context)
-
-            reactIntegrationManager.setJSBundle(reactApplication, bundleURL)
+            val reactApplication: ReactApplication =
+                reactIntegrationManager.getReactApplication(activity?.application)
+            val newBundleURL = getJSBundleFile(context)
+            reactIntegrationManager.setJSBundle(reactApplication, newBundleURL)
         }
 
         private fun extractZipFileAtPath(
@@ -106,19 +87,17 @@ class HotUpdater : ReactPackage {
 
         fun reload(context: Context) {
             val reactIntegrationManager = ReactIntegrationManager(context)
-
             val activity: Activity? = getCurrentActivity(context)
-            val reactApplication: ReactApplication = reactIntegrationManager.getReactApplication(activity?.application)
+            val reactApplication: ReactApplication =
+                reactIntegrationManager.getReactApplication(activity?.application)
             val bundleURL = getJSBundleFile(context)
-
             reactIntegrationManager.setJSBundle(reactApplication, bundleURL)
-
             Handler(Looper.getMainLooper()).post {
                 reactIntegrationManager.reload(reactApplication)
             }
         }
 
-        public fun getJSBundleFile(context: Context): String {
+        fun getJSBundleFile(context: Context): String {
             val sharedPreferences =
                 context.getSharedPreferences("HotUpdaterPrefs", Context.MODE_PRIVATE)
             val urlString = sharedPreferences.getString("HotUpdaterBundleURL", null)
@@ -135,7 +114,7 @@ class HotUpdater : ReactPackage {
             return urlString
         }
 
-        fun updateBundle(
+        suspend fun updateBundle(
             context: Context,
             bundleId: String,
             zipUrl: String?,
@@ -147,67 +126,153 @@ class HotUpdater : ReactPackage {
                 return true
             }
 
-            val downloadUrl = URL(zipUrl)
+            val baseDir = context.getExternalFilesDir(null)
+            val bundleStoreDir = File(baseDir, "bundle-store")
+            if (!bundleStoreDir.exists()) {
+                bundleStoreDir.mkdirs()
+            }
 
-            val basePath = stripPrefixFromPath(bundleId, downloadUrl.path)
-            val path = convertFileSystemPathFromBasePath(context, basePath)
-
-            var connection: HttpURLConnection? = null
-            try {
-                connection = downloadUrl.openConnection() as HttpURLConnection
-                connection.connect()
-
-                val totalSize = connection.contentLength
-                if (totalSize <= 0) {
-                    Log.d("HotUpdater", "Invalid content length: $totalSize")
-                    return false
+            val finalBundleDir = File(bundleStoreDir, bundleId)
+            if (finalBundleDir.exists()) {
+                Log.d("HotUpdater", "Bundle for bundleId $bundleId already exists. Using cached bundle.")
+                val existingIndexFile = finalBundleDir.walk().find { it.name == "index.android.bundle" }
+                if (existingIndexFile != null) {
+                    // Update directory modification time to current time after update
+                    finalBundleDir.setLastModified(System.currentTimeMillis())
+                    setBundleURL(context, existingIndexFile.absolutePath)
+                    cleanupOldBundles(bundleStoreDir)
+                    return true
+                } else {
+                    finalBundleDir.deleteRecursively()
                 }
+            }
 
-                val file = File(path)
-                file.parentFile?.mkdirs()
+            val tempDir = File(baseDir, "bundle-temp")
+            if (tempDir.exists()) {
+                tempDir.deleteRecursively()
+            }
+            tempDir.mkdirs()
 
-                connection.inputStream.use { input ->
-                    file.outputStream().use { output ->
-                        val buffer = ByteArray(8 * 1024)
-                        var bytesRead: Int
-                        var totalRead = 0L
+            val tempZipFile = File(tempDir, "build.zip")
+            val extractedDir = File(tempDir, "extracted")
+            extractedDir.mkdirs()
 
-                        while (input.read(buffer).also { bytesRead = it } != -1) {
-                            output.write(buffer, 0, bytesRead)
-                            totalRead += bytesRead
-                            val progress = (totalRead.toDouble() / totalSize)
-                            progressCallback.invoke(progress)
+            val isSuccess =
+                withContext(Dispatchers.IO) {
+                    val downloadUrl = URL(zipUrl)
+                    val conn =
+                        try {
+                            downloadUrl.openConnection() as HttpURLConnection
+                        } catch (e: Exception) {
+                            Log.d("HotUpdater", "Failed to open connection: ${e.message}")
+                            tempDir.deleteRecursively()
+                            return@withContext false
                         }
+
+                    try {
+                        conn.connect()
+                        val totalSize = conn.contentLength
+                        if (totalSize <= 0) {
+                            Log.d("HotUpdater", "Invalid content length: $totalSize")
+                            tempDir.deleteRecursively()
+                            return@withContext false
+                        }
+                        conn.inputStream.use { input ->
+                            tempZipFile.outputStream().use { output ->
+                                val buffer = ByteArray(8 * 1024)
+                                var bytesRead: Int
+                                var totalRead = 0L
+                                var lastProgressTime = System.currentTimeMillis()
+
+                                while (input.read(buffer).also { bytesRead = it } != -1) {
+                                    output.write(buffer, 0, bytesRead)
+                                    totalRead += bytesRead
+                                    val currentTime = System.currentTimeMillis()
+                                    if (currentTime - lastProgressTime >= 100) {
+                                        val progress = totalRead.toDouble() / totalSize
+                                        progressCallback.invoke(progress)
+                                        lastProgressTime = currentTime
+                                    }
+                                }
+                                progressCallback.invoke(1.0)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.d("HotUpdater", "Failed to download data from URL: $zipUrl, Error: ${e.message}")
+                        tempDir.deleteRecursively()
+                        return@withContext false
+                    } finally {
+                        conn.disconnect()
                     }
+
+                    if (!extractZipFileAtPath(tempZipFile.absolutePath, extractedDir.absolutePath)) {
+                        Log.d("HotUpdater", "Failed to extract zip file.")
+                        tempDir.deleteRecursively()
+                        return@withContext false
+                    }
+                    true
                 }
-            } catch (e: Exception) {
-                Log.d("HotUpdater", "Failed to download data from URL: $zipUrl, Error: ${e.message}")
-                return false
-            } finally {
-                connection?.disconnect()
-            }
 
-            val extractedPath = File(path).parentFile?.path ?: return false
-
-            if (!extractZipFileAtPath(path, extractedPath)) {
-                Log.d("HotUpdater", "Failed to extract zip file.")
+            if (!isSuccess) {
+                tempDir.deleteRecursively()
                 return false
             }
 
-            val extractedDirectory = File(extractedPath)
-            val indexFile = extractedDirectory.walk().find { it.name == "index.android.bundle" }
-
-            if (indexFile != null) {
-                val bundlePath = indexFile.path
-                Log.d("HotUpdater", "Setting bundle URL: $bundlePath")
-                setBundleURL(context, bundlePath)
-            } else {
-                Log.d("HotUpdater", "index.android.bundle not found.")
+            val indexFileExtracted = extractedDir.walk().find { it.name == "index.android.bundle" }
+            if (indexFileExtracted == null) {
+                Log.d("HotUpdater", "index.android.bundle not found in extracted files.")
+                tempDir.deleteRecursively()
                 return false
             }
+
+            // Move (or copy) contents from temp folder to finalBundleDir
+            if (finalBundleDir.exists()) {
+                finalBundleDir.deleteRecursively()
+            }
+            if (!extractedDir.renameTo(finalBundleDir)) {
+                extractedDir.copyRecursively(finalBundleDir, overwrite = true)
+                extractedDir.deleteRecursively()
+            }
+
+            val finalIndexFile = finalBundleDir.walk().find { it.name == "index.android.bundle" }
+            if (finalIndexFile == null) {
+                Log.d("HotUpdater", "index.android.bundle not found in final directory.")
+                tempDir.deleteRecursively()
+                return false
+            }
+
+            // Update final bundle directory modification time to current time after bundle update
+            finalBundleDir.setLastModified(System.currentTimeMillis())
+
+            val bundlePath = finalIndexFile.absolutePath
+            Log.d("HotUpdater", "Setting bundle URL: $bundlePath")
+            setBundleURL(context, bundlePath)
+
+            // Clean up old bundles in the bundle store to keep only up to 2 bundles
+            cleanupOldBundles(bundleStoreDir)
+
+            // Clean up temp directory
+            tempDir.deleteRecursively()
 
             Log.d("HotUpdater", "Downloaded and extracted file successfully.")
             return true
+        }
+
+        // Helper function to delete old bundles, keeping only up to 2 bundles in the bundle-store folder
+        private fun cleanupOldBundles(bundleStoreDir: File) {
+            // Get list of all directories in bundle-store folder
+            val bundles = bundleStoreDir.listFiles { file -> file.isDirectory }?.toList() ?: return
+
+            // Sort by last modified time in descending order to keep most recently updated bundles at the top
+            val sortedBundles = bundles.sortedByDescending { it.lastModified() }
+
+            // Delete all bundles except the top 2
+            if (sortedBundles.size > 2) {
+                sortedBundles.drop(2).forEach { oldBundle ->
+                    Log.d("HotUpdater", "Removing old bundle: ${oldBundle.name}")
+                    oldBundle.deleteRecursively()
+                }
+            }
         }
     }
 }
