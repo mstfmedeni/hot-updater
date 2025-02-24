@@ -86,7 +86,7 @@ export const deploy = async (options: DeployOptions) => {
 
   if (!targetAppVersion) {
     p.log.error(
-      "Target app version not found. -t <targetAppVersion> semver format (e.g.  1.0.0+1233, 1.x.x+1233, 1.0.0 etc))",
+      "Target app version not found. -t <targetAppVersion> semver format (e.g. 1.0.0, 1.x.x)",
     );
     return;
   }

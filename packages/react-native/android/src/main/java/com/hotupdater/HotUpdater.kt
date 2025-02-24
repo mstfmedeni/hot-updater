@@ -28,7 +28,7 @@ class HotUpdater : ReactPackage {
     companion object {
         fun getAppVersion(context: Context): String? {
             val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            return "${packageInfo.versionName}+${packageInfo.versionCode}"
+            return packageInfo.versionName
         }
 
         private fun setBundleURL(

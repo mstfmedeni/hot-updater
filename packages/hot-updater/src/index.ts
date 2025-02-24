@@ -38,10 +38,10 @@ program
   .addOption(
     new Option(
       "-t, --target-app-version <targetAppVersion>",
-      "specify the target app version (semver format e.g. 1.0.0+build, 1.x.x+build, 1.0+x etc)",
+      "specify the target app version (semver format e.g. 1.0.0, 1.x.x)",
     ).argParser((value) => {
       if (!semverValid(value)) {
-        p.log.error("Invalid semver format (e.g. 1.0.0+x, 1.x.x+x, 1.0.0 etc)");
+        p.log.error("Invalid semver format (e.g. 1.0.0, 1.x.x)");
         process.exit(1);
       }
       return value;

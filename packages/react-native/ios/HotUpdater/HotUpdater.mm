@@ -25,8 +25,7 @@ RCT_EXPORT_MODULE();
 
 - (NSString *)getAppVersion {
     NSString *appVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-    NSString *buildNumber = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
-    return [NSString stringWithFormat:@"%@+%@", appVersion, buildNumber];
+    return appVersion;
 }
 
 - (void)setBundleURL:(NSString *)localPath {
